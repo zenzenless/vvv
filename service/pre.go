@@ -238,14 +238,10 @@ func hello() {
 func updateSubscriptions() {
 	subs := configure.GetSubscriptions()
 	lenSubs := len(subs)
-	control := make(chan struct{}, 2) //并发限制同时更新2个订阅
-	// Disconnect from subscriptions before auto-selecting servers from them
-	// to limit the number of connected servers and avoid hitting the limit
-	shouldDisconnect := true
-	err := service.AutoSelectServersFromSubscriptions(shouldDisconnect)
-	if err != nil {
-		log.Error("[AutoSelect] Failed to disconnect servers from subscriptions -- err: %v", err)
-	}
+	control := make(chan struct{}, 2) // 并发限制同时更新2个订阅
+
+	// 不在更新前主动断开已连接的订阅节点（会导致后续映射丢失）
+	// 直接更新订阅数据，然后再执行自动选择以恢复/调整连接状态
 	wg := new(sync.WaitGroup)
 	for i := 0; i < lenSubs; i++ {
 		wg.Add(1)
@@ -255,17 +251,17 @@ func updateSubscriptions() {
 			if err != nil {
 				log.Info("[AutoUpdate] Subscriptions: Failed to update subscription -- ID: %d，err: %v", i, err)
 			} else {
-				log.Info("[AutoUpdate] Subscriptions: Complete updating subscription -- ID: %d，Address: %s", i, subs[i].Address)
+				log.Info("[AutoUpdate] Subscriptions: Complete updating subscription -- ID: %d, Address: %s", i, subs[i].Address)
 			}
 			wg.Done()
 			<-control
 		}(i)
 	}
 	wg.Wait()
-	shouldDisconnect = false
-	err2 := service.AutoSelectServersFromSubscriptions(shouldDisconnect)
-	if err2 != nil {
-		log.Error("[AutoSelect] Failed to auto-select servers from subscriptions -- err: %v", err2)
+	// 更新完成后再执行自动选择（重连或断开由 SelectServersFromSubscription 处理）
+	err := service.AutoSelectServersFromSubscriptions(false)
+	if err != nil {
+		log.Error("[AutoSelect] Failed to auto-select servers from subscriptions -- err: %v", err)
 	}
 
 }

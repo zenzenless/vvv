@@ -19,6 +19,7 @@ import (
 	"github.com/v2rayA/v2rayA/common/resolv"
 	"github.com/v2rayA/v2rayA/core/serverObj"
 	"github.com/v2rayA/v2rayA/core/touch"
+	"github.com/v2rayA/v2rayA/core/v2ray"
 	"github.com/v2rayA/v2rayA/db/configure"
 	"github.com/v2rayA/v2rayA/pkg/util/log"
 )
@@ -264,22 +265,53 @@ func UpdateSubscription(index int, disconnectIfNecessary bool) (err error) {
 		}
 		infoServerRaws[i] = infoServerRaw
 	}
-	for link, cssIndexes := range connectedVmessInfo2CssIndex {
+	// 处理在新订阅列表中已不存在但仍在连接列表中的项
+	removedIndices := make(map[int]bool)
+	for _, cssIndexes := range connectedVmessInfo2CssIndex {
 		for _, cssIndex := range cssIndexes {
 			if disconnectIfNecessary {
+				// 需要断开则直接断开
 				err = Disconnect(*css.Get()[cssIndex], false)
 				if err != nil {
 					reason := "failed to disconnect previous server"
 					return fmt.Errorf("UpdateSubscription: %v", reason)
 				}
 			} else {
-				// 将之前连接的节点append进去
-				// TODO: 变更ServerRaw时可能需要考虑
-				infoServerRaws = append(infoServerRaws, *link2Raw[link])
-				cssAfter[cssIndex].ID = len(infoServerRaws)
+				// 不主动断开时，改为从连接列表中移除（不再 append 回新的 subscription servers）
+				removedIndices[cssIndex] = true
+				log.Info("UpdateSubscription: removing stale connected server index %d from connect list", cssIndex)
 			}
 		}
 	}
+
+	// 过滤掉需要移除的连接条目
+	if len(removedIndices) > 0 {
+		var cssAfterFiltered []*configure.Which
+		for i, w := range cssAfter {
+			if removedIndices[i] {
+				continue
+			}
+			cssAfterFiltered = append(cssAfterFiltered, w)
+		}
+		if err := configure.OverwriteConnects(configure.NewWhiches(cssAfterFiltered)); err != nil {
+			return err
+		}
+		// 保存订阅信息后再触发一次 v2ray 配置更新以应用移除
+		subscriptions[index].Servers = infoServerRaws
+		subscriptions[index].Status = string(touch.NewUpdateStatus())
+		subscriptions[index].Info = status
+		if err := configure.SetSubscription(index, &subscriptions[index]); err != nil {
+			return err
+		}
+		if v2ray.ProcessManager.Running() {
+			if err := v2ray.UpdateV2RayConfig(); err != nil {
+				return fmt.Errorf("UpdateSubscription: failed to update v2ray config after removing stale servers: %v", err)
+			}
+		}
+		return nil
+	}
+
+	// 没有需要移除的项，直接覆盖连接列表并保存订阅
 	if err := configure.OverwriteConnects(configure.NewWhiches(cssAfter)); err != nil {
 		return err
 	}

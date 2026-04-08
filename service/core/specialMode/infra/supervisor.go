@@ -2,13 +2,14 @@ package infra
 
 import (
 	"fmt"
+	"sync"
+
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcapgo"
 	"github.com/v2fly/v2ray-core/v5/common/strmatcher"
 	v2router "github.com/v2rayA/v2ray-lib/router"
 	"github.com/v2rayA/v2rayA/pkg/util/log"
-	"sync"
 )
 
 type DnsSupervisor struct {
@@ -67,7 +68,10 @@ func (d *DnsSupervisor) DeleteHandles(ifname string) (err error) {
 	if !d.Exists(ifname) {
 		return fmt.Errorf("DeleteHandles: handle not exists")
 	}
+	// Close done first so the Run loop treats the subsequent read error as intentional.
 	close(d.handles[ifname].done)
+	// Close the AF_PACKET socket to unblock any pending ReadPacketData call in Run.
+	d.handles[ifname].EthernetHandle.Close()
 	delete(d.handles, ifname)
 	log.Trace("DnsSupervisor:%v deleted", ifname)
 	return
@@ -92,22 +96,32 @@ func (d *DnsSupervisor) Run(ifname string, whitelistDnsServers *v2router.GeoIPMa
 	// we only decode UDP packets
 	pkgsrc := gopacket.NewPacketSource(handle, layers.LinkTypeEthernet)
 	pkgsrc.NoCopy = true
-	//pkgsrc.Lazy = true
+	pkgsrc.Lazy = true
 	d.inner.Unlock()
-	packets := pkgsrc.Packets()
-	go func() {
-		<-handle.done
-		packets <- gopacket.NewPacket(nil, layers.LinkTypeEthernet, pkgsrc.DecodeOptions)
-	}()
-out:
-	for packet := range packets {
+	// Use NextPacket directly instead of Packets() to avoid the internal
+	// packetsToChannel goroutine, which reads from the socket in an
+	// uncontrolled background goroutine and cannot be terminated other than
+	// by closing the underlying EthernetHandle.
+	for {
+		packet, err := pkgsrc.NextPacket()
+		if err != nil {
+			// An error means the socket was closed (EthernetHandle.Close was
+			// called in DeleteHandles). Check whether this was intentional.
+			select {
+			case <-handle.done:
+				log.Trace("DnsSupervisor:%v closed", ifname)
+				return nil
+			default:
+				// Transient read error; keep going.
+				continue
+			}
+		}
 		select {
 		case <-handle.done:
-			break out
+			log.Trace("DnsSupervisor:%v closed", ifname)
+			return nil
 		default:
 		}
-		go handle.handlePacket(packet, ifname, whitelistDnsServers, whitelistDomains)
+		handle.handlePacket(packet, ifname, whitelistDnsServers, whitelistDomains)
 	}
-	log.Trace("DnsSupervisor:%v closed", ifname)
-	return
 }

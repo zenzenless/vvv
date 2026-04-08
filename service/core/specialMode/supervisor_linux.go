@@ -2,15 +2,16 @@ package specialMode
 
 import (
 	"fmt"
-	"github.com/v2rayA/v2ray-lib/router/routercommon"
+	"net"
+	"sync"
+	"time"
+
 	"github.com/v2rayA/v2ray-lib/router"
+	"github.com/v2rayA/v2ray-lib/router/routercommon"
 	"github.com/v2rayA/v2rayA/conf"
 	"github.com/v2rayA/v2rayA/core/specialMode/infra"
 	"github.com/v2rayA/v2rayA/db/configure"
 	"github.com/v2rayA/v2rayA/pkg/util/log"
-	"net"
-	"sync"
-	"time"
 )
 
 var (
@@ -132,8 +133,8 @@ func StartDNSSupervisor(externWhiteDnsServers []*routercommon.CIDR, externWhiteD
 							log.Warn("StartDNSSupervisorConroutine[%v]: %v", ifname, err)
 							return
 						}
+						wg.Add(1)
 						go func(ifname string) {
-							wg.Add(1)
 							defer wg.Done()
 							err = poison.Run(ifname, ipMatcher, wlDms)
 							if err != nil {
